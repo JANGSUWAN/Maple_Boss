@@ -5,13 +5,14 @@ import os
 import requests
 import streamlit as st
 
-# 페이지 설정
+# 페이지 설정 (모바일 최적화 레이아웃)
 st.set_page_config(
     page_title="메이플스토리 보스 정산 앱", page_icon="💰", layout="centered"
 )
 
 PRICE_FILE = "boss_prices.json"
 RECORD_FILE = "boss_records.json"
+ACCOUNT_FILE = "saved_accounts.json"  # 간편 로그인 계정 저장 파일
 
 
 def load_json(file_path, default_data):
@@ -46,22 +47,84 @@ def get_ocid(character_name, api_key):
 # 데이터 로드
 prices = load_json(PRICE_FILE, {})
 records = load_json(RECORD_FILE, {})
+saved_accounts = load_json(ACCOUNT_FILE, {})  # 형식: {"계정별칭(또는 API키 일부)": "API키"}
 
-# 사이드바 설정 (사용자별 API 키 입력)
-st.sidebar.header("🔑 API 설정")
-user_api_key = st.sidebar.text_input(
-    "넥슨 오픈 API 키 입력", type="password", placeholder="live_..."
-).strip()
-st.sidebar.markdown(
-    "*(openapi.nexon.com 에서 발급받은 본인의 키를 입력하세요)*"
-)
+# 세션 상태 초기화
+if "api_key" not in st.session_state:
+  st.session_state["api_key"] = ""
+if "is_logged_in" not in st.session_state:
+  st.session_state["is_logged_in"] = False
 
 st.title("🛡️ 메이플스토리 보스 정산 & 기록 앱")
-st.markdown("캐릭터를 연동하고 이번 주 클리어한 보스를 체크해 보세요!")
 
-if not user_api_key:
-  st.warning("👈 왼쪽 사이드바에 **넥슨 오픈 API 키**를 먼저 입력해주세요.")
+# ----------------- [ 로그인 상태가 아닐 때 : 네이버 스타일 간편 로그인 화면 ] -----------------
+if not st.session_state["is_logged_in"]:
+  st.markdown("### 🔐 넥슨 오픈 API 간편 로그인")
+
+  # 저장된 간편 로그인 계정이 있는 경우 목록 표시
+  if saved_accounts:
+    st.markdown("#### 👤 최근 로그인한 계정 선택")
+    for acc_name, acc_key in list(saved_accounts.items()):
+      # 네이버 스타일 디자인: 계정 버튼과 삭제 버튼을 나란히 배치
+      c_btn, c_del = st.columns([5, 1])
+      with c_btn:
+        if st.button(
+            f"🟢 {acc_name}", key=f"login_{acc_name}", use_container_width=True
+        ):
+          st.session_state["api_key"] = acc_key
+          st.session_state["is_logged_in"] = True
+          st.rerun()
+      with c_del:
+        if st.button("✕", key=f"del_{acc_name}", help="계정 목록에서 삭제"):
+          del saved_accounts[acc_name]
+          save_json(ACCOUNT_FILE, saved_accounts)
+          st.rerun()
+
+    st.markdown("---")
+
+  # 새로운 API 키 직접 입력 및 저장 영역
+  st.markdown("#### ➕ 새 API 키 등록 및 로그인")
+  with st.form("login_form"):
+    input_name = st.text_input(
+        "계정 별칭 (예: 본캐, 부캐1)", placeholder="목록에 표시될 이름"
+    ).strip()
+    input_key = st.text_input(
+        "API 키 입력", type="password", placeholder="live_..."
+    ).strip()
+    save_checked = st.checkbox("간편 로그인 목록에 이 계정 저장", value=True)
+    submitted = st.form_submit_button("🚀 로그인하기")
+
+    if submitted:
+      if input_key.startswith("live_") or len(input_key) > 10:
+        st.session_state["api_key"] = input_key
+        st.session_state["is_logged_in"] = True
+
+        if save_checked:
+          # 별칭이 없으면 API 키 앞부분으로 대체
+          key_alias = (
+              input_name
+              if input_name
+              else f"계정 ({input_key[:8]}...)"
+          )
+          saved_accounts[key_alias] = input_key
+          save_json(ACCOUNT_FILE, saved_accounts)
+
+        st.rerun()
+      else:
+        st.error("올바른 형식의 API 키를 입력해주세요.")
+
+# ----------------- [ 로그인 완료 상태 : 메인 앱 화면 ] -----------------
 else:
+  # 상단에 로그아웃 버튼 배치
+  col_top1, col_top2 = st.columns([4, 1])
+  with col_top1:
+    st.success("🟢 API 키 연동 완료 (간편 로그인 상태)")
+  with col_top2:
+    if st.button("로그아웃"):
+      st.session_state["api_key"] = ""
+      st.session_state["is_logged_in"] = False
+      st.rerun()
+
   tab1, tab2 = st.tabs(["📊 보스 클리어 및 정산", "💎 결정석 가격표 조회"])
 
   with tab2:
@@ -75,13 +138,13 @@ else:
     ).strip()
 
     if char_name:
-      ocid = get_ocid(char_name, user_api_key)
+      ocid = get_ocid(char_name, st.session_state["api_key"])
       if not ocid:
         st.error(
             "캐릭터를 찾을 수 없습니다. 닉네임이나 API 키를 다시 확인해주세요."
         )
       else:
-        st.success("✔️ 캐릭터 연동 완료!")
+        st.success(f"✔️ '{char_name}' 캐릭터 연동 성공!")
 
         char_data = records.get(char_name, {"cleared": []})
         saved_cleared = char_data["cleared"]
@@ -156,7 +219,6 @@ else:
               "결정석 가격": f"{prices[b]['price']:,} 메소",
           })
         st.dataframe(status_data, use_container_width=True)
-
 
 {
     "일일_자쿰 (노멀)": {"type": "일일", "price": 349000},
